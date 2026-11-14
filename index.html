@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Votive</title>
 <meta name="description" content="Votive.">
-<meta name="theme-color" content="#e6e6e4">
+<meta name="theme-color" content="#000000">
 <link rel="preload" href="fonts/Mars-RegularDisplay.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="assets/site.css">
 <link rel="icon" href="assets/favicon.png">
@@ -23,8 +23,8 @@
 <script type="module">
   import {mountRing} from './assets/ring.js';
   const el = document.getElementById('ring');
-  try { mountRing(el, {onReady: () => el.classList.add('ready')}); }
-  catch (e) { el.classList.add('ready'); el.innerHTML = '<img src="assets/ring-still.png" alt="" style="width:100%">'; }
+  const still = () => { el.classList.add('ready'); el.innerHTML = '<img src="assets/ring-still.png" alt="" style="width:100%">'; };
+  try { mountRing(el, {onReady: () => el.classList.add('ready')}).catch(still); } catch (e) { still(); }
 </script>
 </body>
 </html>

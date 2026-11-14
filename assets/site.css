@@ -2,7 +2,7 @@
 @font-face { font-family: 'Mars'; src: url('../fonts/Mars-RegularDisplay.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: 'Mars'; src: url('../fonts/Mars-BoldDisplay.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
 :root {
-  --bg: #e6e6e4; --ink: #1c1c1a; --muted: #6a6a66; --line: #cfcfcb;
+  --bg: #000000; --ink: #ffffff; --muted: #9a9a96; --line: #2b2b29;
   --display: 'Mars', Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
 }

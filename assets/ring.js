@@ -1,130 +1,211 @@
-// Votive ring: a procedural three.js model of the spiked votive ring (reference:
-// Content/Designs/Brand/ring-reference.png), built in code — no mesh or photo texture.
-// Spec: Site/logo-3d/logo-spec.md. Interaction: slow idle spin, follows the pointer,
-// drag (mouse or touch) to spin it with momentum, click/tap for a quick turn.
+// Votive ring: a 3D relief of the spiked votive ring, built from the reference photo itself
+// (img2threejs "projection-first fidelity": the photo's own pixels are the surface).
+//   - silhouette: cut from the photo (the ring is darker than the grey studio ground)
+//   - shape: rounded edges from a distance field of that silhouette, plus relief from the photo's light and shade
+//   - surface: the photo as colour (partly de-lit), a roughness map, studio-environment reflections
+// The back is a mirrored guess (one view only). Spec and review: Site/logo-3d/.
+// Interaction: faces front and sways, tilts toward the pointer, drag to spin, click/tap for a turn.
 import * as THREE from 'three';
-import {mergeGeometries, mergeVertices} from 'three/addons/utils/BufferGeometryUtils.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
 
-// Seeded random so the ring is the same on every load.
-function rng(seed) { return () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646; }
+const PHOTO = new URL('./ring-photo.png', import.meta.url).href;
 
-// Small 3D value noise for the corroded, lumpy surface.
-function makeNoise(seed) {
-	const r = rng(seed), p = new Uint8Array(512), v = new Float32Array(256);
-	for (let i = 0; i < 256; i++) { p[i] = i; v[i] = r(); }
-	for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
-	for (let i = 0; i < 256; i++) p[i + 256] = p[i];
-	const s = (t) => t * t * (3 - 2 * t);
-	const h = (x, y, z) => v[p[p[p[x & 255] + (y & 255)] + (z & 255)]];
-	return (x, y, z) => {
-		const X = Math.floor(x), Y = Math.floor(y), Z = Math.floor(z), fx = s(x - X), fy = s(y - Y), fz = s(z - Z);
-		const l = (a, b, t) => a + (b - a) * t;
-		return l(l(l(h(X, Y, Z), h(X + 1, Y, Z), fx), l(h(X, Y + 1, Z), h(X + 1, Y + 1, Z), fx), fy),
-			l(l(h(X, Y, Z + 1), h(X + 1, Y, Z + 1), fx), l(h(X, Y + 1, Z + 1), h(X + 1, Y + 1, Z + 1), fx), fy), fz) * 2 - 1;
-	};
+function loadImage(src) {
+	return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
 }
 
-export function createVotiveRing() {
-	const rand = rng(23);
-	const noise = makeNoise(7);
-	const parts = [];
+// Separable box blur on a Float32Array image (w×h), r = radius in px.
+function blur(src, w, h, r) {
+	const tmp = new Float32Array(src.length), out = new Float32Array(src.length), n = 2 * r + 1;
+	for (let y = 0; y < h; y++) {
+		let s = 0;
+		for (let x = -r; x <= r; x++) s += src[y * w + Math.min(w - 1, Math.max(0, x))];
+		for (let x = 0; x < w; x++) {
+			tmp[y * w + x] = s / n;
+			s += src[y * w + Math.min(w - 1, x + r + 1)] - src[y * w + Math.max(0, x - r)];
+		}
+	}
+	for (let x = 0; x < w; x++) {
+		let s = 0;
+		for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+		for (let y = 0; y < h; y++) {
+			out[y * w + x] = s / n;
+			s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+		}
+	}
+	return out;
+}
 
-	// 1. Band: a thick, slightly flattened torus (outer r ≈ 0.47, hole r ≈ 0.31).
-	const band = new THREE.TorusGeometry(0.39, 0.082, 28, 220);
-	band.scale(1, 1, 0.72);
-	parts.push(band);
+// Two-pass chamfer distance (in px) from every masked pixel to the nearest unmasked one.
+function distanceField(mask, w, h) {
+	const INF = 1e9, d = new Float32Array(w * h);
+	for (let i = 0; i < d.length; i++) d[i] = mask[i] ? INF : 0;
+	const a = 1, b = Math.SQRT2;
+	for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+		const i = y * w + x; if (!d[i]) continue;
+		let v = d[i];
+		if (x > 0) v = Math.min(v, d[i - 1] + a);
+		if (y > 0) { v = Math.min(v, d[i - w] + a); if (x > 0) v = Math.min(v, d[i - w - 1] + b); if (x < w - 1) v = Math.min(v, d[i - w + 1] + b); }
+		d[i] = v;
+	}
+	for (let y = h - 1; y >= 0; y--) for (let x = w - 1; x >= 0; x--) {
+		const i = y * w + x; if (!d[i]) continue;
+		let v = d[i];
+		if (x < w - 1) v = Math.min(v, d[i + 1] + a);
+		if (y < h - 1) { v = Math.min(v, d[i + w] + a); if (x < w - 1) v = Math.min(v, d[i + w + 1] + b); if (x > 0) v = Math.min(v, d[i + w - 1] + b); }
+		d[i] = v;
+	}
+	return d;
+}
 
-	// 2. Spike crown: 22 short blunt cones around ~300° of the rim, irregular length, lean and spacing.
-	const N = 26, gapCenter = -Math.PI / 2, gapHalf = 0.26; // open sector at the bottom where the tang is
-	for (let i = 0; i < N; i++) {
-		const t = (i + 0.5) / N;
-		let a = gapCenter + gapHalf + t * (2 * Math.PI - 2 * gapHalf) + (rand() - 0.5) * 0.08;
-		const len = 0.11 + rand() * 0.06, base = 0.038 + rand() * 0.012;
-		// Truncated cone with a rounded cap: the real spikes are blunt nubs, not points.
-		const cone = new THREE.CylinderGeometry(base * 0.32, base * 1.08, len, 12, 4);
-		const cap = new THREE.SphereGeometry(base * 0.32, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2);
-		cap.translate(0, len / 2, 0);
-		const merged = mergeGeometries([cone.toNonIndexed(), cap.toNonIndexed()].map((g) => { for (const k of Object.keys(g.attributes)) if (k !== 'position') g.deleteAttribute(k); return g; }));
-		cone.copy(merged);
-		cone.scale(1, 1, 0.85);
-		cone.translate(0, len / 2 + 0.44, 0);
-		cone.rotateZ(a - Math.PI / 2 + (rand() - 0.5) * 0.22); // point outward, with a little lean
-		cone.rotateX((rand() - 0.5) * 0.25);
-		parts.push(cone);
+// Keep only the largest 4-connected component of the mask (drops dust and shadow specks).
+function largestComponent(mask, w, h) {
+	const lab = new Int32Array(w * h), stack = []; let best = 0, bestN = 0, id = 0;
+	for (let s = 0; s < mask.length; s++) {
+		if (!mask[s] || lab[s]) continue;
+		id++; let n = 0; stack.push(s); lab[s] = id;
+		while (stack.length) {
+			const i = stack.pop(); n++;
+			const x = i % w, y = (i / w) | 0;
+			if (x > 0 && mask[i - 1] && !lab[i - 1]) { lab[i - 1] = id; stack.push(i - 1); }
+			if (x < w - 1 && mask[i + 1] && !lab[i + 1]) { lab[i + 1] = id; stack.push(i + 1); }
+			if (y > 0 && mask[i - w] && !lab[i - w]) { lab[i - w] = id; stack.push(i - w); }
+			if (y < h - 1 && mask[i + w] && !lab[i + w]) { lab[i + w] = id; stack.push(i + w); }
+		}
+		if (n > bestN) { bestN = n; best = id; }
+	}
+	const out = new Uint8Array(w * h);
+	for (let i = 0; i < out.length; i++) out[i] = lab[i] === best ? 1 : 0;
+	return out;
+}
+
+const canvasTex = (w, h, fill) => {
+	const c = document.createElement('canvas'); c.width = w; c.height = h;
+	const g = c.getContext('2d'), d = g.createImageData(w, h);
+	fill(d.data); g.putImageData(d, 0, 0);
+	return new THREE.CanvasTexture(c);
+};
+
+export async function createVotiveRing() {
+	const img = await loadImage(PHOTO);
+	const W = img.width, H = img.height;
+	const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+	const cx = cv.getContext('2d', {willReadFrequently: true});
+	cx.drawImage(img, 0, 0);
+	const px = cx.getImageData(0, 0, W, H).data;
+
+	// Luminance, and a per-row estimate of the studio ground (the photo's background has a soft gradient).
+	const lum = new Float32Array(W * H);
+	for (let i = 0; i < W * H; i++) lum[i] = (0.2126 * px[i * 4] + 0.7152 * px[i * 4 + 1] + 0.0722 * px[i * 4 + 2]) / 255;
+	const ground = new Float32Array(H);
+	for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < 8; x++) s += lum[y * W + x] + lum[y * W + W - 1 - x]; ground[y] = s / 16; }
+
+	// Mask: pixels clearly darker than the ground, smoothed, then only the largest piece.
+	let soft = new Float32Array(W * H);
+	for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; soft[i] = Math.min(1, Math.max(0, (ground[y] - lum[i] - 0.045) / 0.05)); }
+	soft = blur(soft, W, H, 1);
+	let mask = new Uint8Array(W * H);
+	for (let i = 0; i < mask.length; i++) mask[i] = soft[i] > 0.5 ? 1 : 0;
+	mask = largestComponent(mask, W, H);
+
+	// Height: a rounded profile from the distance field (cast metal has soft edges) + relief from the photo.
+	const dist = distanceField(mask, W, H);
+	const lumBlur = blur(lum, W, H, 6);
+	const lumFine = blur(lum, W, H, 1);
+	const R = 9; // px over which the edge rounds over
+	const height = new Float32Array(W * H);
+	for (let i = 0; i < height.length; i++) {
+		if (!mask[i]) continue;
+		const t = Math.min(1, dist[i] / R);
+		const round = Math.sqrt(1 - (1 - t) * (1 - t)); // quarter-circle edge
+		const relief = (lumFine[i] - lumBlur[i]) * 2.2; // bright bumps catch light, pits are dark
+		height[i] = round * (1 + 0.35 * Math.min(1, dist[i] / 22)) + relief * t;
 	}
 
-	// 3. Tang: the cast sprue below the ring, tapering down and bending a little to the left.
-	const tangPts = [];
-	for (let k = 0; k <= 10; k++) { const y = k / 10; tangPts.push(new THREE.Vector2(0.095 * (1 - y) ** 0.7 + 0.016, -y * 0.3)); }
-	const tang = new THREE.LatheGeometry(tangPts, 16);
-	tang.scale(1, 1, 0.55);
-	const tp = tang.attributes.position;
-	for (let k = 0; k < tp.count; k++) { const y = -tp.getY(k) / 0.3; tp.setX(k, tp.getX(k) - 0.06 * y * y); }
-	tang.translate(0.01, -0.44, 0);
-	parts.push(tang);
+	// Colour: the photo with its baked-in shading partly removed, so the scene lights don't double it.
+	let ms = 0, mn = 0;
+	for (let i = 0; i < mask.length; i++) if (mask[i]) { ms += lumBlur[i]; mn++; }
+	const meanLum = ms / mn;
+	const map = canvasTex(W, H, (d) => {
+		for (let i = 0; i < W * H; i++) {
+			const k = mask[i] ? Math.min(1.6, Math.max(0.7, meanLum / Math.max(0.05, lumBlur[i]))) : 1;
+			const f = 1 + (k - 1) * 0.55;
+			d[i * 4] = Math.min(255, px[i * 4] * f); d[i * 4 + 1] = Math.min(255, px[i * 4 + 1] * f); d[i * 4 + 2] = Math.min(255, px[i * 4 + 2] * f); d[i * 4 + 3] = 255;
+		}
+	});
+	map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 8;
+	// Roughness: crusty, bright patches rougher; darker worn metal a little smoother.
+	const roughnessMap = canvasTex(W, H, (d) => {
+		for (let i = 0; i < W * H; i++) { const v = 255 * Math.min(1, Math.max(0.55, 0.62 + (lumFine[i] - meanLum) * 1.2)); d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
+	});
 
-	// 4. Casting flash: an irregular web filling the inside bottom of the ring above the tang.
-	const web = new THREE.Shape();
-	web.moveTo(-0.13, -0.33);
-	web.quadraticCurveTo(-0.04, -0.28, 0.0, -0.31);
-	web.quadraticCurveTo(0.07, -0.27, 0.12, -0.335);
-	web.lineTo(0.09, -0.42); web.lineTo(-0.09, -0.42); web.closePath();
-	const flash = new THREE.ExtrudeGeometry(web, {depth: 0.035, bevelEnabled: true, bevelSize: 0.015, bevelThickness: 0.015, bevelSegments: 2, curveSegments: 10});
-	flash.translate(0, 0, -0.0175);
-	parts.push(flash);
-
-	// Merge, then displace along normals for the pitted, lumpy corrosion and paint vertex colours.
-	// Strip to position only, weld shared vertices so normals are smooth (no faceted stripes).
-	const clean = parts.map((g) => { const n = g.toNonIndexed(); for (const k of Object.keys(n.attributes)) if (k !== 'position') n.deleteAttribute(k); return n; });
-	const geo = mergeVertices(mergeGeometries(clean), 1e-4);
-	geo.computeVertexNormals();
-	geo.computeVertexNormals();
-	const P = geo.attributes.position, Nn = geo.attributes.normal, col = new Float32Array(P.count * 3);
-	const lead = new THREE.Color('#8c8f8b'), ochre = new THREE.Color('#bcae92'), dark = new THREE.Color('#5c605f'), light = new THREE.Color('#c9c6bc'), c = new THREE.Color();
-	for (let k = 0; k < P.count; k++) {
-		const x = P.getX(k), y = P.getY(k), z = P.getZ(k);
-		const d = noise(x * 10, y * 10, z * 10) * 0.016 + noise(x * 34, y * 34, z * 34) * 0.007 + noise(x * 95, y * 95, z * 95) * 0.0035;
-		P.setXYZ(k, x + Nn.getX(k) * d, y + Nn.getY(k) * d, z + Nn.getZ(k) * d);
-		const patch = Math.max(0, noise(x * 5 + 3, y * 5, z * 5) * 1.5 - 0.1) * (0.6 + 0.4 * noise(x * 40, y * 40, z * 40));
-		const speck = Math.max(0, noise(x * 120, y * 120, z * 120) - 0.45) * 1.6;
-		c.copy(lead).lerp(ochre, Math.min(1, patch * 1.3)).lerp(light, Math.min(0.6, speck)).lerp(dark, Math.max(0, -d * 35) * 0.55);
-		col.set([c.r, c.g, c.b], k * 3);
+	// Geometry: one vertex per photo pixel near the ring; front and back sheets meet at height 0 on the edge.
+	const S = 1 / H; // world units per px (ring ≈ 1 unit tall)
+	const T = 9 * S; // half-thickness at full height
+	const near = new Uint8Array(W * H);
+	for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+		let any = 0;
+		for (let oy = -1; oy <= 1 && !any; oy++) for (let ox = -1; ox <= 1; ox++) { const X = x + ox, Y = y + oy; if (X >= 0 && Y >= 0 && X < W && Y < H && mask[Y * W + X]) { any = 1; break; } }
+		near[y * W + x] = any;
 	}
-	geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+	const pos = [], uv = [], idx = [], vid = new Int32Array(W * H * 2).fill(-1);
+	for (let side = 0; side < 2; side++) {
+		const sgn = side ? -1 : 1, o = side * W * H;
+		for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+			const i = y * W + x; if (!near[i]) continue;
+			vid[o + i] = pos.length / 3;
+			pos.push((x - W / 2) * S, (H / 2 - y) * S, sgn * (mask[i] ? height[i] : 0) * T * (side ? 0.92 : 1));
+			uv.push(x / (W - 1), 1 - y / (H - 1));
+		}
+		for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+			const i = y * W + x;
+			if (!(mask[i] || mask[i + 1] || mask[i + W] || mask[i + W + 1])) continue;
+			const a = vid[o + i], b = vid[o + i + 1], c = vid[o + i + W], d = vid[o + i + W + 1];
+			if (a < 0 || b < 0 || c < 0 || d < 0) continue;
+			if (side) idx.push(a, b, c, b, d, c); else idx.push(a, c, b, b, c, d);
+		}
+	}
+	const geo = new THREE.BufferGeometry();
+	geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+	geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+	geo.setIndex(idx);
 	geo.computeVertexNormals();
 
-	const mat = new THREE.MeshStandardMaterial({vertexColors: true, roughness: 0.9, metalness: 0.28});
+	const mat = new THREE.MeshStandardMaterial({map, roughnessMap, roughness: 1, metalness: 0.32, envMapIntensity: 1.0});
 	const mesh = new THREE.Mesh(geo, mat);
 	mesh.name = 'votive-ring';
 	return mesh;
 }
 
 // Mount the interactive logo into a container element.
-export function mountRing(el, {onReady} = {}) {
+export async function mountRing(el, {onReady} = {}) {
 	const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 	const renderer = new THREE.WebGLRenderer({antialias: true, alpha: true});
 	renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 	renderer.outputColorSpace = THREE.SRGBColorSpace;
+	renderer.toneMapping = THREE.ACESFilmicToneMapping;
+	renderer.toneMappingExposure = 1.05;
 	el.appendChild(renderer.domElement);
 
 	const scene = new THREE.Scene();
-	const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
-	camera.position.set(0, 0, 3.4);
-	scene.add(new THREE.HemisphereLight('#f4f2ee', '#66645e', 1.25));
-	const key = new THREE.DirectionalLight('#ffffff', 1.8); key.position.set(1.5, 2, 2.5); scene.add(key);
-	const rim = new THREE.DirectionalLight('#dfe6ea', 1.1); rim.position.set(-2, -1, -1.5); scene.add(rim);
+	const pmrem = new THREE.PMREMGenerator(renderer);
+	scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture; // soft studio reflections
+	const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 20);
+	camera.position.set(0, 0, 2.25);
+	const key = new THREE.DirectionalLight('#fff6ea', 1.4); key.position.set(-1.2, 1.8, 2.2); scene.add(key);
+	const rim = new THREE.DirectionalLight('#dde6ec', 0.8); rim.position.set(1.8, -0.6, -1.6); scene.add(rim);
+	scene.add(new THREE.AmbientLight('#ffffff', 0.15));
 
 	const pivot = new THREE.Group(); scene.add(pivot);
-	const ring = createVotiveRing(); ring.position.y = 0.08; pivot.add(ring);
+	pivot.add(await createVotiveRing());
 
 	const resize = () => { const w = el.clientWidth, h = el.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); };
 	new ResizeObserver(resize).observe(el); resize();
 
-	// Interaction state: spin velocity (drag + inertia), pointer tilt, click impulse.
 	let spin = 0, vel = 0, tiltX = 0, tiltY = 0, aimX = 0, aimY = 0, dragging = false, lastX = 0, moved = 0, t = 0;
 	el.addEventListener('pointermove', (e) => {
 		const r = el.getBoundingClientRect();
-		aimX = ((e.clientY - r.top) / r.height - 0.5) * 0.5; aimY = ((e.clientX - r.left) / r.width - 0.5) * 0.6;
+		aimX = ((e.clientY - r.top) / r.height - 0.5) * 0.45; aimY = ((e.clientX - r.left) / r.width - 0.5) * 0.55;
 		if (dragging) { const dx = e.clientX - lastX; vel = dx * 0.004; spin += dx * 0.01; moved += Math.abs(dx); lastX = e.clientX; }
 	});
 	el.addEventListener('pointerdown', (e) => { dragging = true; moved = 0; lastX = e.clientX; el.setPointerCapture(e.pointerId); el.classList.add('grabbing'); });
@@ -138,18 +219,20 @@ export function mountRing(el, {onReady} = {}) {
 	if (pose !== null) el.style.transition = 'none';
 	let first = true;
 	renderer.setAnimationLoop(() => {
-		if (pose !== null) { pivot.rotation.set(0, (+pose * Math.PI) / 180, 0); renderer.render(scene, camera); if (first) { first = false; onReady && onReady(); } return; }
-		// Idle: face front and sway gently. After a drag or click it coasts, then springs back to the nearest front.
-		t += 1 / 60;
-		if (!dragging) {
-			const home = Math.round(spin / (2 * Math.PI)) * 2 * Math.PI + (reduce ? 0 : Math.sin(t * 0.55) * 0.42);
-			vel = vel * 0.965 + (home - spin) * (Math.abs(vel) > 0.02 ? 0 : 0.0025);
-			spin += vel;
+		if (pose !== null) {
+			pivot.rotation.set(0, (+pose * Math.PI) / 180, 0);
+		} else {
+			t += 1 / 60;
+			if (!dragging) {
+				const home = Math.round(spin / (2 * Math.PI)) * 2 * Math.PI + (reduce ? 0 : Math.sin(t * 0.55) * 0.42);
+				vel = vel * 0.965 + (home - spin) * (Math.abs(vel) > 0.02 ? 0 : 0.0025);
+				spin += vel;
+			}
+			tiltX += (aimX - tiltX) * 0.06; tiltY += (aimY - tiltY) * 0.06;
+			pivot.rotation.set(tiltX, spin + tiltY, 0);
 		}
-		tiltX += (aimX - tiltX) * 0.06; tiltY += (aimY - tiltY) * 0.06;
-		pivot.rotation.set(tiltX, spin + tiltY, 0);
 		renderer.render(scene, camera);
 		if (first) { first = false; onReady && onReady(); }
 	});
-	return {renderer, scene, camera, ring};
+	return {renderer, scene, camera};
 }
